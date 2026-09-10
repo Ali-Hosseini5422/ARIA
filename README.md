@@ -3,7 +3,6 @@
 Public instrument fields for anticipation-robust incentive design in mobile crowdsensing.
 
 Authors: Seyed Ali Hosseini, Omid Sojodishijani (corresponding), Vahid Khajehvand  
-Qazvin Islamic Azad University
 
 ## Layout
 
