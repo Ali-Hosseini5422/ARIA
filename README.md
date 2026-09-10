@@ -1,4 +1,4 @@
-# ARIA complete package
+# ARIA: Public Instrument Fields for Anticipation-Robust Incentive Design in Mobile Crowdsensing
 
 Public instrument fields for anticipation-robust incentive design in mobile crowdsensing.
 
