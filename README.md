@@ -1,4 +1,4 @@
-# ARIA: Public Instrument Fields for Anticipation-Robust Incentive Design in Mobile Crowdsensing
+# ARIA: A Public Instrument Field for Incentive Design under Strategic Anticipation in Mobile CrowdSensing
 
 Public instrument fields for anticipation-robust incentive design in mobile crowdsensing.
 
