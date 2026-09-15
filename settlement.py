@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Tuple
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -23,6 +22,7 @@ class Allocation:
     covered_tasks: int
     n_tasks: int
     value: float
+    x: np.ndarray = field(default_factory=lambda: np.zeros(5))
 
 
 def characteristic_value(
@@ -30,15 +30,15 @@ def characteristic_value(
     slot: SlotState,
     cfg: SimConfig,
     phi: np.ndarray | None = None,
-) -> Tuple[float, int]:
+) -> tuple[float, int]:
     if phi is None:
         phi = coverage_kernel(slot.worker_xy, slot.task_xy)
     n_tasks = slot.task_xy.shape[0]
     if winners.size == 0:
         return 0.0, 0
-    cov = phi[winners].max(axis=0) if winners.size else np.zeros(n_tasks)
+    cov = phi[winners].max(axis=0)
     covered = int((cov > cfg.cover_phi).sum())
-    quality = float(slot.quality[winners].mean()) if winners.size else 0.0
+    quality = float(slot.quality[winners].mean())
     if winners.size >= 2:
         xy = slot.worker_xy[winners]
         d = np.sqrt(((xy[:, None, :] - xy[None, :, :]) ** 2).sum(axis=2))
@@ -56,15 +56,20 @@ def characteristic_value(
 
 
 class PhaseACover:
+    """IR-tight greedy cover of yet-uncovered tasks. Pay equals cost."""
+
     def __init__(self, cfg: SimConfig):
         self.cfg = cfg
 
-    def run(self, slot: SlotState, budget: float, phi: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float]:
+    def run(
+        self, slot: SlotState, budget: float, phi: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, float]:
         n = slot.cost.size
         pay = np.zeros(n)
-        chosen = []
+        chosen: list[int] = []
         covered = np.zeros(phi.shape[1], dtype=bool)
-        remaining = budget
+        remaining = float(budget)
+        # cheapest feasible cover first (IR-tight)
         order = np.argsort(slot.cost)
         for i in order:
             if remaining < slot.cost[i]:
@@ -72,15 +77,19 @@ class PhaseACover:
             useful = phi[i] > self.cfg.cover_phi
             if not np.any(useful & ~covered):
                 continue
-            chosen.append(i)
+            chosen.append(int(i))
             pay[i] = slot.cost[i]
             remaining -= slot.cost[i]
             covered |= useful
-        return np.array(chosen, dtype=int), pay, budget - remaining
+        return np.asarray(chosen, dtype=int), pay, budget - remaining
 
 
 class CriticalRankDrop:
-    """Critical-value payments on a ranked prefix + last-winner dropping."""
+    """Monotone critical-value payments on a ranked prefix + last-winner drop.
+
+    The payment is a cost-floor critical value on the score ranking, not a
+    Euclidean projection onto the budget simplex (which could cut below cost).
+    """
 
     def __init__(self, cfg: SimConfig):
         self.cfg = cfg
@@ -92,36 +101,33 @@ class CriticalRankDrop:
         budget: float,
         blocked: np.ndarray,
         delta: np.ndarray | None = None,
-    ) -> Tuple[np.ndarray, np.ndarray, float]:
+    ) -> tuple[np.ndarray, np.ndarray, float]:
         n = scores.size
         pay = np.zeros(n)
         eligible = np.ones(n, dtype=bool)
-        eligible[blocked] = False
+        if blocked.size:
+            eligible[blocked] = False
         if delta is None:
             delta = np.zeros(n)
         order = np.argsort(-scores)
         order = order[eligible[order]]
         if order.size == 0 or budget <= 0:
-            return np.array([], dtype=int), pay, 0.0
-        # Approximate critical value: payment that keeps i above next eligible score.
+            return np.asarray([], dtype=int), pay, 0.0
+
         crit = np.zeros(n)
         for k, i in enumerate(order):
             nxt = scores[order[k + 1]] if k + 1 < order.size else 0.0
-            # monotone transform: higher score -> not lower payment floor at cost
-            gap = max(scores[i] - nxt, 0.0)
+            gap = max(float(scores[i] - nxt), 0.0)
             crit[i] = max(slot.cost[i], slot.cost[i] + 0.35 * gap * slot.quality[i])
-        prefix = []
-        spend = 0.0
-        hire_cap = max(6, int(0.18 * n))
-        for i in order:
-            if len(prefix) >= hire_cap:
-                break
-            price = crit[i] + delta[i]
-            if spend + price <= budget + 1e-9:
-                prefix.append(i)
-                pay[i] = price
-                spend += price
-            else:
-                break
-        winners = np.array(prefix, dtype=int)
-        return winners, pay, spend
+
+        # longest feasible prefix (last-winner dropping)
+        prices = crit[order] + delta[order]
+        csum = np.cumsum(prices)
+        keep = int(np.searchsorted(csum, budget + 1e-9, side="right"))
+        prefix = order[:keep]
+        if keep:
+            pay[prefix] = prices[:keep]
+            spend = float(prices[:keep].sum())
+        else:
+            spend = 0.0
+        return np.asarray(prefix, dtype=int), pay, spend

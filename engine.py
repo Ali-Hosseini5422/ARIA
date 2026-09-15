@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import List
 
 import numpy as np
@@ -17,6 +16,7 @@ class Simulator:
         self.selector = selector
 
     def regime(self, B: float, n_tasks: int, abd: float, uncert: float, vol: float) -> np.ndarray:
+        """Public r_t. Frozen before current reports / encodings."""
         return np.array(
             [
                 B / max(self.cfg.expected_b(), 1e-6),
@@ -32,26 +32,26 @@ class Simulator:
         world = CrowdWorld(self.cfg)
         B = float(self.cfg.b0)
         Z = 0.0
-        abd = 0.10
+        abd = float(world.abd_rate)
+        uncert = float(world.last_uncert)
         ep = EpisodeMetrics()
         shocks: List[float] = []
         for t in range(self.cfg.t_slots):
             slot = world.sample_slot(t)
-            uncert = float(slot.encoding[:, 2].std())
-            vol = float(np.std(shocks[-5:])) / max(self.cfg.expected_b(), 1.0) if shocks else 0.1
+            vol = (
+                float(np.std(shocks[-5:])) / max(self.cfg.expected_b(), 1.0)
+                if shocks
+                else 0.1
+            )
+            # r uses lagged abandonment and lagged realized uncertainty only
             r = self.regime(B, slot.task_xy.shape[0], abd, uncert, vol)
             alloc = self.selector.allocate(slot, r, Z, B)
-            spend = min(alloc.spend, B)
-            if alloc.spend > B + 1e-6:
-                # last-winner dropping already applied inside selectors; clip residual numerically
-                spend = B
+            spend = min(float(alloc.spend), B)
             welfare = alloc.value - spend - self.cfg.psi * alloc.winners.size
             worker_u = 0.0
             if alloc.winners.size:
                 worker_u = float((alloc.pay[alloc.winners] - slot.cost[alloc.winners]).mean())
-            x = getattr(alloc, "x", None)
-            if x is None:
-                x = np.zeros(5)
+            x = np.asarray(alloc.x, dtype=float)
             ep.add(
                 SlotMetrics(
                     welfare=float(welfare),
@@ -62,18 +62,19 @@ class Simulator:
                     delayed_frac=alloc.delayed_frac,
                     ir_violation=alloc.ir_violation,
                     worker_util=worker_u,
-                    x=np.zeros(5),
+                    x=x.copy(),
                 )
             )
             world.observe_outcome(alloc.winners, alloc.pay, alloc.quality)
             B = max(B - spend + slot.inflow + slot.shock, 0.0)
             Z = max(Z + spend - slot.inflow - slot.shock - self.cfg.expected_b(), 0.0)
-            abd = world.abd_rate
+            abd = float(world.abd_rate)
+            uncert = float(world.last_uncert)
             shocks.append(slot.shock)
         return ep
 
 
-def run_selector(name: str, cfg: SimConfig):
+def make_selector(name: str, cfg: SimConfig) -> Selector:
     from .selectors import (
         CoverOnly,
         FieldOnly,
@@ -93,7 +94,9 @@ def run_selector(name: str, cfg: SimConfig):
         "aria_private": PrivateMapARIA,
     }
     if name.startswith("locked_"):
-        sel = LockedVertex(cfg, name.split("_", 1)[1])
-    else:
-        sel = table[name](cfg)
-    return Simulator(cfg, sel).run()
+        return LockedVertex(cfg, name.split("_", 1)[1])
+    return table[name](cfg)
+
+
+def run_selector(name: str, cfg: SimConfig) -> EpisodeMetrics:
+    return Simulator(cfg, make_selector(name, cfg)).run()

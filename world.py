@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -27,7 +26,12 @@ class SlotState:
 
 
 class CrowdWorld:
-    """Paired synthetic city. One seed yields one world for every selector."""
+    """Paired synthetic city. One seed yields one physical world for every selector.
+
+    Attacker bits are always drawn. Extreme encodings are applied only when
+    ``cfg.attack`` is True, after the physical RNG draws, so positions, tasks,
+    shocks, and attacker membership stay paired.
+    """
 
     def __init__(self, cfg: SimConfig):
         self.cfg = cfg
@@ -50,6 +54,7 @@ class CrowdWorld:
         self.last_q = np.zeros(n)
         self.idle = np.ones(n, dtype=bool)
         self.abd_rate = 0.08
+        self.last_uncert = 0.10
 
     def _move(self) -> None:
         drift = self.rng.normal(0.0, 0.35, size=self.xy.shape)
@@ -65,7 +70,8 @@ class CrowdWorld:
         bid = self.true_cost.copy()
         bid[self.strategic] *= 1.0 + self.cfg.shade
         encoding = np.stack(
-            [self.alpha, self.lam, self.gamma, self.beta_h, self.energy], axis=1
+            [self.alpha, self.lam, self.gamma, self.beta_h, self.energy],
+            axis=1,
         )
         if self.cfg.attack:
             encoding[self.attacker] = np.array([0.2, 3.4, 0.2, 0.2, 1.0])
@@ -97,5 +103,9 @@ class CrowdWorld:
             self.last_q[winners] = q[winners]
             self.idle[:] = True
             self.idle[winners] = False
+            self.last_uncert = float(np.std(q[winners]))
+        else:
+            self.idle[:] = True
+            self.last_uncert = 0.5 * self.last_uncert + 0.5 * 0.20
         hired = winners.size / max(self.cfg.n, 1)
         self.abd_rate = 0.7 * self.abd_rate + 0.3 * (1.0 - hired)

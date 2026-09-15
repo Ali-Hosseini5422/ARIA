@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 
 from .config import SimConfig
 from .field import InstrumentField, PrivateMap, PublicMap, project_to_field
-from .scores import BaseScores
+from .scores import BaseScores, coverage_kernel
 from .settlement import Allocation, CriticalRankDrop, PhaseACover, characteristic_value
 from .world import SlotState
 
@@ -35,26 +33,23 @@ def _finish(
     if winners.size:
         q[winners] = slot.quality[winners]
     value, covered = characteristic_value(winners, slot, cfg, phi)
-    spend = float(pay[winners].sum()) if winners.size else 0.0
-    welfare = value - spend - cfg.psi * winners.size
     ir = 0.0
     if winners.size:
         slip = np.maximum(slot.cost[winners] - pay[winners], 0.0)
         ir = float((slip > 1e-8).mean())
-    util = float((pay[winners] - slot.cost[winners]).mean()) if winners.size else 0.0
     return Allocation(
         winners=winners,
         pay=pay,
         quality=q,
-        spend=spend,
-        phase_a=np.array([], dtype=int),
+        spend=float(pay[winners].sum()) if winners.size else 0.0,
+        phase_a=np.asarray([], dtype=int),
         phase_b=winners,
         delayed_frac=delayed_frac,
         ir_violation=ir,
         covered_tasks=covered,
         n_tasks=slot.task_xy.shape[0],
         value=value,
-        # welfare stored via value-spend-psi by engine
+        x=np.asarray(x, dtype=float).copy(),
     )
 
 
@@ -72,30 +67,23 @@ class PostedPrice(Selector):
         self.cfg = cfg
 
     def allocate(self, slot: SlotState, r: np.ndarray, z: float, B: float) -> Allocation:
-        from .scores import coverage_kernel
-
         phi = coverage_kernel(slot.worker_xy, slot.task_xy)
         price = self.cfg.posted_price
         order = np.argsort(-phi.max(axis=1))
-        winners = []
+        winners: list[int] = []
         pay = np.zeros(slot.cost.size)
         spend = 0.0
-        hire_cap = max(6, int(0.18 * slot.cost.size))
         for i in order:
-            if len(winners) >= hire_cap:
-                break
             if spend + price > B:
                 break
-            winners.append(i)
+            winners.append(int(i))
             pay[i] = price
             spend += price
-        w = np.array(winners, dtype=int)
-        alloc = _finish(slot, self.cfg, w, pay, phi, np.zeros(5), 0.0)
-        return alloc
+        return _finish(slot, self.cfg, np.asarray(winners, dtype=int), pay, phi, np.zeros(5), 0.0)
 
 
 class GTDIMInterface(Selector):
-    """Protocol-matched two-stage CPS + PMI interface, not vendor binary."""
+    """Protocol-matched two-stage CPS + PMI interface, not a vendor binary."""
 
     name = "gtdim_if"
 
@@ -103,28 +91,26 @@ class GTDIMInterface(Selector):
         self.cfg = cfg
 
     def allocate(self, slot: SlotState, r: np.ndarray, z: float, B: float) -> Allocation:
-        from .scores import coverage_kernel
-
         phi = coverage_kernel(slot.worker_xy, slot.task_xy)
         shortage = (phi > self.cfg.cover_phi).sum(axis=0)
         bonus = (phi * (1.0 / np.maximum(shortage, 1.0))[None, :]).sum(axis=1)
         pmi = 0.55 * slot.quality + 0.30 * phi.max(axis=1) + 0.15 * bonus / (1.0 + bonus)
         pmi = pmi / (1.0 + slot.bid)
         order = np.argsort(-pmi)
-        winners = []
+        winners: list[int] = []
         pay = np.zeros(slot.cost.size)
         spend = 0.0
+        cap = max(8, min(slot.task_xy.shape[0] + 4, int(0.2 * slot.cost.size)))
         for i in order:
             price = max(slot.cost[i], slot.cost[i] + 0.15 * bonus[i])
             if spend + price > B:
                 continue
-            winners.append(i)
+            winners.append(int(i))
             pay[i] = price
             spend += price
-            if len(winners) >= max(8, min(slot.task_xy.shape[0] + 4, int(0.2 * slot.cost.size))):
+            if len(winners) >= cap:
                 break
-        w = np.array(winners, dtype=int)
-        return _finish(slot, self.cfg, w, pay, phi, np.zeros(5), 0.0)
+        return _finish(slot, self.cfg, np.asarray(winners, dtype=int), pay, phi, np.zeros(5), 0.0)
 
 
 class CoverOnly(Selector):
@@ -135,8 +121,6 @@ class CoverOnly(Selector):
         self.phase_a = PhaseACover(cfg)
 
     def allocate(self, slot: SlotState, r: np.ndarray, z: float, B: float) -> Allocation:
-        from .scores import coverage_kernel
-
         phi = coverage_kernel(slot.worker_xy, slot.task_xy)
         winners, pay, _ = self.phase_a.run(slot, B, phi)
         return _finish(slot, self.cfg, winners, pay, phi, np.zeros(5), 0.0)
@@ -162,26 +146,27 @@ class _FieldMixin:
         phi = self.scores.phi(slot)
         s = self.scores.compute(slot)
         pay = np.zeros(slot.cost.size)
-        blocked = np.array([], dtype=int)
+        blocked = np.asarray([], dtype=int)
         spend_a = 0.0
-        wa = np.array([], dtype=int)
+        wa = np.asarray([], dtype=int)
         if use_cover:
             cap = _eta(r, self.cfg) * B
             wa, pay_a, spend_a = self.phase_a.run(slot, cap, phi)
             pay[wa] = pay_a[wa]
             blocked = wa
         sigma = s @ x + _kappa(r) * self.scores.public_residual(slot, phi)
-        wb, pay_b, spend_b = self.phase_b.run(slot, sigma, B - spend_a, blocked)
+        wb, pay_b, _spend_b = self.phase_b.run(slot, sigma, B - spend_a, blocked)
         pay[wb] = pay_b[wb]
-        winners = np.unique(np.concatenate([wa, wb])).astype(int)
-        delayed = float(x[3])
-        alloc = _finish(slot, self.cfg, winners, pay, phi, x, delayed)
+        winners = np.unique(np.concatenate([wa, wb])).astype(int) if wa.size or wb.size else np.asarray([], dtype=int)
+        alloc = _finish(slot, self.cfg, winners, pay, phi, x, float(x[3]))
         alloc.phase_a = wa
         alloc.phase_b = wb
         return alloc
 
 
 class LockedVertex(_FieldMixin, Selector):
+    """One-hot instrument. No Phase A prefix (manuscript identification)."""
+
     def __init__(self, cfg: SimConfig, name: str):
         _FieldMixin.__init__(self, cfg)
         self.vname = name
@@ -192,7 +177,7 @@ class LockedVertex(_FieldMixin, Selector):
         x = self.x.copy()
         if self.vname == "rsc" and slot.quit.mean() < 0.05:
             x = project_to_field(x * 0.3)
-        return self._settle(slot, x, r, B, use_cover=True)
+        return self._settle(slot, x, r, B, use_cover=False)
 
 
 class FieldOnly(_FieldMixin, Selector):

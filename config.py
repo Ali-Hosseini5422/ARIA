@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Tuple
 
 
 @dataclass
 class SimConfig:
-    """Constants from Table II of the ARIA manuscript."""
+    """Constants aligned with the manuscript parameter table."""
 
     n: int = 500
     t_slots: int = 24
@@ -32,4 +32,4 @@ class SimConfig:
     instrument_names: Tuple[str, ...] = ("ref", "cpt", "ax", "del", "rsc")
 
     def expected_b(self) -> float:
-        return self.expected_budget
+        return float(self.expected_budget)

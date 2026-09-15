@@ -13,7 +13,7 @@ def coverage_kernel(worker_xy: np.ndarray, task_xy: np.ndarray, scale: float = 3
 
 
 class BaseScores:
-    """Closed-form five coordinates. No sequence model."""
+    """Closed-form five coordinates. No sequence model. Does not read B_t/E[B]."""
 
     def __init__(self, cfg: SimConfig):
         self.cfg = cfg

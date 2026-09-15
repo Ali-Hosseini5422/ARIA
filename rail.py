@@ -1,12 +1,12 @@
-"""Gas-accounting wrap. Does not re-allocate winners."""
+from __future__ import annotations
 
-GAS_PER_HIRE = 281_292
+from .config import SimConfig
 
 
-def gas_for_hires(n_hires: int) -> dict:
-    return {
-        "gas_per_hire": GAS_PER_HIRE,
-        "gas_slot": GAS_PER_HIRE * int(n_hires),
-        "mia_public": 0.917,
-        "mia_rail": 0.679,
-    }
+def gas_per_hire(cfg: SimConfig) -> int:
+    """Groth16-BN254 verify + pay + calldata accounting only. Not a chain send."""
+    return int(cfg.gas_per_hire)
+
+
+def gas_for_hires(hires: int, cfg: SimConfig) -> int:
+    return int(hires) * gas_per_hire(cfg)
